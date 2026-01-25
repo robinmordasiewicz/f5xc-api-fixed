@@ -1,0 +1,278 @@
+name: Validate and Release
+
+on:
+  schedule:
+    # Run daily at 6 AM UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_download:
+        description: 'Force download even if specs unchanged'
+        type: boolean
+        default: false
+      skip_live_tests:
+        description: 'Skip live API tests (dry run)'
+        type: boolean
+        default: false
+      create_release:
+        description: 'Create GitHub release'
+        type: boolean
+        default: true
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  validate:
+    name: Validate Specs
+    runs-on: ubuntu-latest
+    outputs:
+      specs_changed: ${{ steps.download.outputs.changed }}
+      has_discrepancies: ${{ steps.validate.outputs.has_discrepancies }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Cache downloaded specs
+        uses: actions/cache@v4
+        with:
+          path: |
+            specs/original
+            .etag_cache
+          key: specs-${{ github.run_id }}
+          restore-keys: |
+            specs-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Download specs
+        id: download
+        run: |
+          if [ "${{ inputs.force_download }}" = "true" ]; then
+            python -m scripts.download --force --list
+          else
+            python -m scripts.download --list
+          fi
+
+          # Check if specs were downloaded/changed
+          if [ -f .etag_cache ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate specs (dry run)
+        if: inputs.skip_live_tests == true
+        run: |
+          python -m scripts.validate --dry-run
+          echo "has_discrepancies=false" >> $GITHUB_OUTPUT
+        id: validate_dry
+
+      - name: Validate specs (live)
+        if: inputs.skip_live_tests != true
+        id: validate
+        env:
+          F5XC_API_URL: ${{ secrets.F5XC_API_URL }}
+          F5XC_API_TOKEN: ${{ secrets.F5XC_API_TOKEN }}
+        run: |
+          if [ -z "$F5XC_API_TOKEN" ]; then
+            echo "::warning::F5XC_API_TOKEN not set, running in dry-run mode"
+            python -m scripts.validate --dry-run
+            echo "has_discrepancies=false" >> $GITHUB_OUTPUT
+          else
+            python -m scripts.validate || true
+
+            # Check if discrepancies were found
+            if [ -f reports/validation_report.json ]; then
+              DISCREPANCIES=$(python -c "import json; r=json.load(open('reports/validation_report.json')); print(len(r.get('discrepancies', [])))")
+              if [ "$DISCREPANCIES" -gt 0 ]; then
+                echo "has_discrepancies=true" >> $GITHUB_OUTPUT
+              else
+                echo "has_discrepancies=false" >> $GITHUB_OUTPUT
+              fi
+            else
+              echo "has_discrepancies=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Upload validation reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-reports
+          path: reports/
+          retention-days: 30
+
+      - name: Upload specs
+        uses: actions/upload-artifact@v4
+        with:
+          name: original-specs
+          path: specs/original/
+          retention-days: 7
+
+  reconcile:
+    name: Reconcile Specs
+    needs: validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Download original specs
+        uses: actions/download-artifact@v4
+        with:
+          name: original-specs
+          path: specs/original/
+
+      - name: Download validation reports
+        uses: actions/download-artifact@v4
+        with:
+          name: validation-reports
+          path: reports/
+
+      - name: Reconcile specs
+        run: |
+          python -m scripts.reconcile
+
+      - name: Upload reconciled specs
+        uses: actions/upload-artifact@v4
+        with:
+          name: reconciled-specs
+          path: release/specs/
+          retention-days: 7
+
+  release:
+    name: Create Release
+    needs: [validate, reconcile]
+    if: inputs.create_release != false
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Download reconciled specs
+        uses: actions/download-artifact@v4
+        with:
+          name: reconciled-specs
+          path: release/specs/
+
+      - name: Download validation reports
+        uses: actions/download-artifact@v4
+        with:
+          name: validation-reports
+          path: reports/
+
+      - name: Determine version
+        id: version
+        run: |
+          # Try to get version from git tags
+          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+          if [ -z "$VERSION" ]; then
+            # Generate version from date
+            VERSION=$(date -u +"%Y.%m.%d")
+          fi
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build release package
+        run: |
+          python -m scripts.release --version ${{ steps.version.outputs.version }}
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          python -m scripts.release --release-notes > release_notes.md
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: F5 XC API Specs v${{ steps.version.outputs.version }}
+          body_path: release_notes.md
+          files: |
+            release/f5xc-api-fixed-v${{ steps.version.outputs.version }}.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify:
+    name: Notify on Failure
+    needs: [validate, reconcile, release]
+    if: failure()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create issue on failure
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const date = new Date().toISOString().split('T')[0];
+            const title = `Validation Pipeline Failed - ${date}`;
+            const body = `
+            ## Validation Pipeline Failure
+
+            **Run ID**: ${{ github.run_id }}
+            **Date**: ${date}
+            **Trigger**: ${{ github.event_name }}
+
+            ### Failed Jobs
+            - Validate: ${{ needs.validate.result }}
+            - Reconcile: ${{ needs.reconcile.result }}
+            - Release: ${{ needs.release.result }}
+
+            ### Actions
+            1. Check the [workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            2. Review validation reports in artifacts
+            3. Fix any issues and re-run the pipeline
+
+            /cc @${{ github.repository_owner }}
+            `;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['automation', 'bug']
+            });
