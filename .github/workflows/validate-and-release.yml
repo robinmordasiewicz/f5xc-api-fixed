@@ -131,21 +131,21 @@ jobs:
           echo "hash=$HASH" >> $GITHUB_OUTPUT
 
       - name: Upload validation reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: validation-reports
           path: reports/
           retention-days: 30
 
       - name: Upload reconciled specs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: reconciled-specs
           path: release/specs/
           retention-days: 7
 
       - name: Upload spec metadata
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: spec-metadata
           path: specs/original/.spec_metadata.json
