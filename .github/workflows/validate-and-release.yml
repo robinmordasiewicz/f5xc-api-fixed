@@ -50,7 +50,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Cache pip packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
@@ -64,7 +64,7 @@ jobs:
 
       - name: Get previous ETag from cache
         id: prev_etag
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .etag_cache
           key: etag-${{ github.sha }}
