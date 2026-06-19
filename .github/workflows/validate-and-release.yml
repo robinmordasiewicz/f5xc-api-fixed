@@ -331,7 +331,7 @@ jobs:
           cat release_notes.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.check-release-needed.outputs.version }}
           name: F5 XC API Specs v${{ needs.check-release-needed.outputs.version }}
