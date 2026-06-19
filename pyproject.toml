@@ -27,7 +27,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "requests>=2.32.0",
+    "requests>=2.33.1",
     "pyyaml>=6.0.3",
     "openapi-spec-validator>=0.7.2",
     "jsonschema>=4.23.0",
